@@ -176,4 +176,3 @@ jobs:
           if curl_exit != "0" or http_status != "200" or data.get("success") is not True:
               sys.exit(1)
           PY
-```
