@@ -1,0 +1,38 @@
+
+name: Test Ptuj RSS access
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-rss:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check RSS HTTP response
+        run: |
+          curl --location --silent --show-error \
+            --max-time 30 \
+            --output /tmp/ptuj-rss.xml \
+            --write-out 'HTTP status: %{http_code}\nContent type: %{content_type}\n' \
+            https://www.ptuj.si/RazpisiRSS
+
+      - name: Validate RSS XML
+        run: |
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+
+          try:
+              root = ET.parse("/tmp/ptuj-rss.xml").getroot()
+              print("XML valid: YES")
+              print("Root element:", root.tag)
+              if root.tag.lower() == "rss":
+                  print("RSS items:", len(root.findall("./channel/item")))
+              else:
+                  print("Response is not standard RSS XML")
+          except Exception as e:
+              print("XML valid: NO")
+              print("Error:", str(e))
+              raise SystemExit(1)
+          PY
