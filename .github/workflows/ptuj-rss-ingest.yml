@@ -18,6 +18,7 @@ jobs:
           FEED_URL: https://www.ptuj.si/RazpisiRSS
           INGEST_URL: https://ptuj-drazbe.lenart-rok1992-57c.workers.dev/api/ptuj/monitor/ingest
           PTUJ_RSS_INGEST_SECRET: ${{ secrets.PTUJ_RSS_INGEST_SECRET }}
+          MONITOR_TRIGGER: ${{ github.event_name }}
         shell: bash
         run: |
           set -euo pipefail
@@ -96,6 +97,7 @@ jobs:
             --request POST \
             --header "Authorization: Bearer ${PTUJ_RSS_INGEST_SECRET}" \
             --header "Content-Type: application/rss+xml" \
+            --header "X-Ptuj-GitHub-Event: ${MONITOR_TRIGGER}" \
             --data-binary "@$feed_file" \
             --output "$response_file" \
             --write-out '%{http_code}' \
