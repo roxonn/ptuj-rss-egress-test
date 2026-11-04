@@ -1,8 +1,3 @@
-Verified: the workflow uses only `workflow_dispatch` (no schedule), fetches the official feed, posts it to the production Worker using the `PTUJ_RSS_INGEST_SECRET` Actions secret, and reports safe status/counts. It fails on feed or Worker HTTP errors and does not print the secret or RSS body. I did not run or change anything.
-
-File: `.github/workflows/ptuj-rss-ingest.yml`
-
-```yaml
 name: Ptuj RSS ingestion test
 
 on:
