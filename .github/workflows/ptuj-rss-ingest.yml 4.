@@ -1,0 +1,184 @@
+Verified: the workflow uses only `workflow_dispatch` (no schedule), fetches the official feed, posts it to the production Worker using the `PTUJ_RSS_INGEST_SECRET` Actions secret, and reports safe status/counts. It fails on feed or Worker HTTP errors and does not print the secret or RSS body. I did not run or change anything.
+
+File: `.github/workflows/ptuj-rss-ingest.yml`
+
+```yaml
+name: Ptuj RSS ingestion test
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  ingest:
+    name: Fetch and ingest official RSS
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Fetch, validate, and securely ingest RSS
+        env:
+          FEED_URL: https://www.ptuj.si/RazpisiRSS
+          INGEST_URL: https://ptuj-drazbe.lenart-rok1992-57c.workers.dev/api/ptuj/monitor/ingest
+          PTUJ_RSS_INGEST_SECRET: ${{ secrets.PTUJ_RSS_INGEST_SECRET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${PTUJ_RSS_INGEST_SECRET:-}" ]]; then
+            echo "Missing repository Actions secret: PTUJ_RSS_INGEST_SECRET."
+            exit 1
+          fi
+
+          feed_file="$(mktemp)"
+          response_file="$(mktemp)"
+          curl_error_file="$(mktemp)"
+          trap 'rm -f "$feed_file" "$response_file" "$curl_error_file"' EXIT
+
+          set +e
+          feed_metadata="$(curl \
+            --silent \
+            --show-error \
+            --location \
+            --max-time 30 \
+            --output "$feed_file" \
+            --write-out '%{http_code}\n%{content_type}' \
+            "$FEED_URL" 2>"$curl_error_file")"
+          feed_curl_exit=$?
+          set -e
+
+          feed_http_status="${feed_metadata%%$'\n'*}"
+          feed_content_type="${feed_metadata#*$'\n'}"
+          if [[ "$feed_metadata" != *$'\n'* ]]; then
+            feed_content_type="not received"
+          fi
+          feed_http_status="${feed_http_status:-000}"
+          feed_content_type="${feed_content_type:-not received}"
+
+          if python3 - "$feed_file" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          try:
+              root = ET.parse(sys.argv[1]).getroot()
+              root_name = root.tag.rsplit("}", 1)[-1].lower()
+              channel = next(
+                  child for child in root
+                  if child.tag.rsplit("}", 1)[-1].lower() == "channel"
+              )
+              valid = root_name == "rss" and channel is not None
+          except (ET.ParseError, OSError, StopIteration):
+              valid = False
+
+          sys.exit(0 if valid else 1)
+          PY
+          then
+            valid_rss_xml=true
+          else
+            valid_rss_xml=false
+          fi
+
+          {
+            echo "### Ptuj RSS ingestion test"
+            echo "- Feed HTTP status: \`$feed_http_status\`"
+            echo "- Feed Content-Type: \`$feed_content_type\`"
+            echo "- Valid RSS XML: \`$valid_rss_xml\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          printf 'Feed HTTP status: %s\nFeed Content-Type: %s\nValid RSS XML: %s\n' \
+            "$feed_http_status" "$feed_content_type" "$valid_rss_xml"
+
+          if [[ "$feed_curl_exit" -ne 0 || "$feed_http_status" != "200" || "$valid_rss_xml" != "true" ]]; then
+            echo "The official feed was not received as valid RSS XML."
+            exit 1
+          fi
+
+          set +e
+          ingest_http_status="$(curl \
+            --silent \
+            --show-error \
+            --max-time 30 \
+            --request POST \
+            --header "Authorization: Bearer ${PTUJ_RSS_INGEST_SECRET}" \
+            --header "Content-Type: application/rss+xml" \
+            --data-binary "@$feed_file" \
+            --output "$response_file" \
+            --write-out '%{http_code}' \
+            "$INGEST_URL" 2>"$curl_error_file")"
+          ingest_curl_exit=$?
+          set -e
+          ingest_http_status="${ingest_http_status:-000}"
+
+          python3 - "$response_file" "$ingest_http_status" "$ingest_curl_exit" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json
+          import os
+          import re
+          import sys
+
+          response_path, http_status, curl_exit = sys.argv[1:]
+          secret = os.environ.get("PTUJ_RSS_INGEST_SECRET", "")
+          try:
+              with open(response_path, encoding="utf-8") as response_file:
+                  data = json.load(response_file)
+          except (OSError, json.JSONDecodeError):
+              data = {}
+
+          print("- Worker HTTP status: `" + http_status + "`")
+          print("- Worker request completed: `" + str(curl_exit == "0") + "`")
+          for field, label in (
+              ("receivedItemCount", "RSS items received"),
+              ("matchingAnnouncementCount", "Exact phrase matches"),
+              ("newAnnouncementCount", "New announcements"),
+              ("duplicateAnnouncementCount", "Duplicate announcements"),
+          ):
+              value = data.get(field)
+              if isinstance(value, int) and value >= 0:
+                  print(f"- {label}: `{value}`")
+
+          if data.get("success") is True:
+              print("- Worker ingestion: `success`")
+          else:
+              print("- Worker ingestion: `failed`")
+              message = str(data.get("error", "No safe error detail returned."))
+              if secret:
+                  message = message.replace(secret, "[redacted]")
+              message = re.sub(r"[\x00-\x1f\x7f]", " ", message)[:240]
+              print("- Error: `" + message.replace("`", "'") + "`")
+          PY
+
+          python3 - "$response_file" "$ingest_http_status" "$ingest_curl_exit" <<'PY'
+          import json
+          import os
+          import re
+          import sys
+
+          response_path, http_status, curl_exit = sys.argv[1:]
+          secret = os.environ.get("PTUJ_RSS_INGEST_SECRET", "")
+          try:
+              with open(response_path, encoding="utf-8") as response_file:
+                  data = json.load(response_file)
+          except (OSError, json.JSONDecodeError):
+              data = {}
+
+          print(f"Worker HTTP status: {http_status}")
+          if data.get("success") is True:
+              print("Worker ingestion: success")
+              for field, label in (
+                  ("receivedItemCount", "RSS items received"),
+                  ("matchingAnnouncementCount", "Exact phrase matches"),
+                  ("newAnnouncementCount", "New announcements"),
+                  ("duplicateAnnouncementCount", "Duplicate announcements"),
+              ):
+                  value = data.get(field)
+                  if isinstance(value, int) and value >= 0:
+                      print(f"{label}: {value}")
+          else:
+              message = str(data.get("error", "No safe error detail returned."))
+              if secret:
+                  message = message.replace(secret, "[redacted]")
+              message = re.sub(r"[\x00-\x1f\x7f]", " ", message)[:240]
+              print("Worker ingestion: failed")
+              print("Error: " + message)
+
+          if curl_exit != "0" or http_status != "200" or data.get("success") is not True:
+              sys.exit(1)
+          PY
+```
